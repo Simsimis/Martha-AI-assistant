@@ -276,6 +276,22 @@ def is_exit(text: str) -> bool:
     return normalized in {"τέλος", "έξοδος", "εξοδος", "αντίο", "αντιο", "stop", "exit"}
 
 
+def _microphone_help() -> str:
+    if sys.platform == "darwin":
+        return (
+            "Δώσε άδεια στο Terminal από Ρυθμίσεις > Απόρρητο και ασφάλεια > Μικρόφωνο."
+        )
+    if sys.platform == "win32":
+        return (
+            "Στις Windows άνοιξε Ρυθμίσεις > Απόρρητο και ασφάλεια > Μικρόφωνο "
+            "και ενεργοποίησε την πρόσβαση για εφαρμογές επιφάνειας εργασίας."
+        )
+    return (
+        "Στο Linux έλεγξε τη συσκευή εισόδου από τις ρυθμίσεις ήχου ή με "
+        "«pavucontrol» και βεβαιώσου ότι δεν είναι κλειδωμένη σε σιγή."
+    )
+
+
 def resolve_model(client: OpenAI) -> str:
     try:
         model_ids = [model.id for model in client.models.list().data]
@@ -421,7 +437,7 @@ def main() -> None:
         print("[Σύστημα] Λειτουργία πληκτρολογίου. Γράψε «τέλος» για έξοδο.", flush=True)
     else:
         print(
-            "[Σύστημα] Αν δεν σε ακούει, τρέξε πρώτα: ./venv/bin/python mic_check.py",
+            "[Σύστημα] Αν δεν σε ακούει, τρέξε πρώτα: python speech_to_text.py",
             flush=True,
         )
         try:
@@ -442,10 +458,7 @@ def main() -> None:
             break
         except OSError as exc:
             print(f"\n[Σύστημα] Πρόβλημα με το μικρόφωνο: {exc}", flush=True)
-            print(
-                "Δώσε άδεια στο Terminal από Ρυθμίσεις > Απόρρητο και ασφάλεια > Μικρόφωνο.",
-                flush=True,
-            )
+            print(_microphone_help(), flush=True)
             break
 
         if not user_input:

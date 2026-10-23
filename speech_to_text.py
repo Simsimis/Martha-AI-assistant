@@ -1,14 +1,22 @@
-"""Τοπική μετατροπή ελληνικής ομιλίας σε κείμενο, με το μικρόφωνο και το MLX Whisper."""
+"""Τοπική μετατροπή ελληνικής ομιλίας σε κείμενο, με το μικρόφωνο και Whisper.
+
+macOS (Apple Silicon): MLX Whisper. Linux και Windows: faster-whisper, που
+χρησιμοποιεί GPU (CUDA) όπου υπάρχει ή CPU με int8. Το μοντέλο φορτώνεται
+lazy, μόνο στην πρώτη μετατροπή, ώστε η λειτουργία --text να ξεκινάει γρήγορα.
+"""
 
 import os
+import platform
 import subprocess
 
-import mlx_whisper
 import numpy as np
 import speech_recognition as sr
 
+IS_MACOS = platform.system() == "Darwin"
+IS_WINDOWS = platform.system() == "Windows"
 WHISPER_MODEL = os.environ.get(
-    "MARTHA_WHISPER_MODEL", "mlx-community/whisper-medium-mlx-q4"
+    "MARTHA_WHISPER_MODEL",
+    "mlx-community/whisper-medium-mlx-q4" if IS_MACOS else "Systran/faster-whisper-medium",
 )
 SAMPLE_RATE = 16_000
 _MIC_HELP_SHOWN = False
@@ -32,13 +40,20 @@ def pick_microphone_index() -> int | None:
 
 
 def _open_microphone_privacy_settings() -> None:
-    subprocess.run(
-        [
-            "open",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
-        ],
-        check=False,
-    )
+    if IS_WINDOWS:
+        subprocess.run(
+            ["cmd", "/c", "start", "", "ms-settings:privacy-microphone"],
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    elif IS_MACOS:
+        subprocess.run(
+            [
+                "open",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+            ],
+            check=False,
+        )
 
 
 def _hint_microphone_permission() -> None:
@@ -46,15 +61,45 @@ def _hint_microphone_permission() -> None:
     if _MIC_HELP_SHOWN:
         return
     _MIC_HELP_SHOWN = True
+    if IS_WINDOWS:
+        print(
+            "\n[Σύστημα] Το μικρόφωνο γράφει σιγή. Ανοίγω τις Ρυθμίσεις των "
+            "Windows: Απόρρητο και ασφάλεια > Μικρόφωνο, ενεργοποίησε την "
+            "πρόσβαση για εφαρμογές επιφάνειας εργασίας. Έλεγξε και την ένταση "
+            "εισόδου στον Ήχο. Ξεκίνα ξανά το τερματικό μετά.\n"
+            "Για έλεγχο: python speech_to_text.py\n",
+            flush=True,
+        )
+        _open_microphone_privacy_settings()
+        return
+    if IS_MACOS:
+        print(
+            "\n[Σύστημα] Το μικρόφωνο γράφει σιγή. Στο Mac πήγαινε σε "
+            "Ρυθμίσεις → Απόρρητο και ασφάλεια → Μικρόφωνο και ενεργοποίησε "
+            "«Terminal» ή «Cursor» (ό,τι τρέχει το agent.py). "
+            "Μετά κλείσε και ξανάνοιξε το τερματικό.\n"
+            "Για έλεγχο: python speech_to_text.py\n",
+            flush=True,
+        )
+        _open_microphone_privacy_settings()
+        return
     print(
-        "\n[Σύστημα] Το μικρόφωνο γράφει σιγή. Στο Mac πήγαινε σε "
-        "Ρυθμίσεις → Απόρρητο και ασφάλεια → Μικρόφωνο και ενεργοποίησε "
-        "«Terminal» ή «Cursor» (ό,τι τρέχει το agent.py). "
-        "Μετά κλείσε και ξανάνοιξε το τερματικό.\n"
-        "Για έλεγχο: ./venv/bin/python mic_check.py\n",
+        "\n[Σύστημα] Το μικρόφωνο γράφει σιγή. Στο Linux άνοιξε τις ρυθμίσεις "
+        "ήχου (GNOME Ρυθμίσεις > Ήχος > Είσοδος ή pavucontrol), διάλεξε τη "
+        "σωστή συσκευή εισόδου και ανέβα την ένταση. Με Bluetooth, βεβαιώσου "
+        "ότι το προφίλ είναι headset, όχι μόνο αναπαραγωγή.\n"
+        "Για έλεγχο: python speech_to_text.py\n",
         flush=True,
     )
-    _open_microphone_privacy_settings()
+
+
+def _has_cuda() -> bool:
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
 
 
 class SpeechToText:
@@ -66,6 +111,8 @@ class SpeechToText:
         self.recognizer.dynamic_energy_threshold = True
         self.recognizer.pause_threshold = 0.9
         self.recognizer.phrase_threshold = 0.2
+        self._engine_name = ""
+        self._engine = None
 
     def _microphone(self) -> sr.Microphone:
         kwargs = {"sample_rate": SAMPLE_RATE}
@@ -81,6 +128,25 @@ class SpeechToText:
         )
         self.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
         print("[Σύστημα] Η αναγνώριση είναι έτοιμη.", flush=True)
+
+    def load_engine(self) -> None:
+        """Φορτώνει τη μηχανή Whisper της πλατφόρμας μία και μόνο φορά."""
+        if self._engine is not None:
+            return
+        if IS_MACOS:
+            import mlx_whisper
+
+            self._engine_name, self._engine = "mlx", mlx_whisper
+            return
+        from faster_whisper import WhisperModel
+
+        device = "cuda" if _has_cuda() else "cpu"
+        self._engine_name, self._engine = "faster", WhisperModel(
+            self.model,
+            device=device,
+            compute_type="float16" if device == "cuda" else "int8",
+            cpu_threads=os.cpu_count() or 4,
+        )
 
     def listen(self, timeout: float = 12, phrase_time_limit: float = 25) -> str:
         """Γράφει μία φράση από το μικρόφωνο και την επιστρέφει ως ελληνικό κείμενο."""
@@ -112,7 +178,7 @@ class SpeechToText:
         if peak < 0.01:
             print(
                 f"[Σύστημα] Πολύ αδύναμος ήχος (ένταση {peak:.3f}). "
-                "Ανέβασε την ένταση εισόδου στις Ρυθμίσεις Ήχου.",
+                "Ανέβασε την ένταση εισόδου στις ρυθμίσεις ήχου της πλατφόρμας.",
                 flush=True,
             )
             return ""
@@ -123,7 +189,13 @@ class SpeechToText:
 
     def transcribe(self, samples: np.ndarray) -> str:
         waveform = np.ascontiguousarray(samples, dtype=np.float32)
-        result = mlx_whisper.transcribe(
+        self.load_engine()
+        if self._engine_name == "mlx":
+            return self._transcribe_mlx(waveform)
+        return self._transcribe_faster(waveform)
+
+    def _transcribe_mlx(self, waveform: np.ndarray) -> str:
+        result = self._engine.transcribe(
             waveform,
             path_or_hf_repo=self.model,
             language=self.language,
@@ -136,6 +208,23 @@ class SpeechToText:
         if segments and all(segment.get("no_speech_prob", 0) >= 0.6 for segment in segments):
             return ""
         return (result.get("text") or "").strip()
+
+    def _transcribe_faster(self, waveform: np.ndarray) -> str:
+        segments, _info = self._engine.transcribe(
+            waveform,
+            language=self.language,
+            condition_on_previous_text=False,
+            temperature=0.0,
+            beam_size=1,
+            vad_filter=True,
+            initial_prompt="Συνομιλία στα ελληνικά.",
+        )
+        spoken = [
+            segment.text
+            for segment in segments
+            if segment.no_speech_prob < 0.6
+        ]
+        return "".join(spoken).strip()
 
 
 def _samples_from_audio(audio: sr.AudioData) -> np.ndarray:

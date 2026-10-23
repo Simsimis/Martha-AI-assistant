@@ -1,0 +1,16 @@
+# build artifacts
+__pycache__/
+*.pyc
+
+# virtualenvs
+venv/
+
+# runtime state
+agent_memory.db
+MARTHA_DB_*.db
+*.db
+
+# editor/config
+.vscode/
+.idea/
+.env

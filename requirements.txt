@@ -1,0 +1,7 @@
+mlx-whisper
+SpeechRecognition
+PyAudio
+audioop-lts
+openai
+ddgs
+numpy
